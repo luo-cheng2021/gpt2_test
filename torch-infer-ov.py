@@ -27,7 +27,6 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         self.net = self.core.read_model(model=onnx_model_path)
         serialize(self.net, "origin.xml", "origin.bin")
         self.net.reshape({'input_ids': [2, -1], # [-1, -1],
-                          'attention_mask': [2, -1], #[-1, -1],
                           'past_key_values': [12,2,2,12,-1,64] #[12,2,-1,12,-1,64]
                           })
         config = {'PERFORMANCE_HINT': 'LATENCY',
@@ -88,7 +87,6 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             attention_mask = attention_mask.cpu().numpy()
         inputs = {
             "input_ids": Tensor(input_ids.cpu().numpy()),
-            "attention_mask": Tensor(attention_mask),
             "past_key_values": Tensor(past_key_values_array),
         }
         #print(input_ids.shape, attention_mask.shape, past_key_values_array.shape)
@@ -151,7 +149,6 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             "past_key_values": past,
             "use_cache": kwargs.get("use_cache"),
             "position_ids": position_ids,
-            "attention_mask": attention_mask,
             "token_type_ids": token_type_ids,
         }
 

@@ -30,14 +30,12 @@ def generate_onnx_representation(model, onnx_name_path=None):
 
     test_inputs = {
         "input_ids": torch.LongTensor([[4299, 23748, 62, 6894, 33529]]),
-        "attention_mask": torch.LongTensor([[1, 1, 1, 1, 1, 1]]),
         "past_key_values": past_key_values,
     }
     print("onnx dummpy输入配置")
     dummy_inputs = tuple([x for x in test_inputs.values()])
     dynamic_axes = {
         "input_ids": {0: "batch_size", 1: "seq_len"},  # 动态维度,第0和1维度都是可变的
-        "attention_mask": {0: "batch_size", 1: "seq_len"},  # 动态维度,第0和1维度都是可变的
         "past_key_values": {
             2: "batch_size",
             4: "seq_len",
@@ -54,12 +52,11 @@ def generate_onnx_representation(model, onnx_name_path=None):
         do_constant_folding=True,
         input_names=[
             "input_ids",
-            "attention_mask",
             "past_key_values",
         ],
         # 模型输入的名字，随便写
         output_names=["logits", "past_key_values_array"],  # 模型输出的名字，使用ort就要根据这个名字获取结果
-        #dynamic_axes=dynamic_axes,
+        dynamic_axes=dynamic_axes,
     )
     return onnx_name_path
 
@@ -92,7 +89,6 @@ def test_torch_inference(model):
     # 如果解码第一个token，没有past_key_values, 则使用torch.randn([1, 12, 0, 64])，在transformers中等同于past_key_values=None
     test_inputs = {
         "input_ids": tensor([[4299, 23748, 62, 6894, 33529]]),
-        "attention_mask": tensor([[1, 1, 1, 1, 1]]),
         "past_key_values": past_key_values,
     }
     start = time.time()
@@ -114,7 +110,6 @@ def test_onnx_inference(onnx_name_path, config):
     session = onnxruntime.InferenceSession(onnx_name_path)
     ort_inputs = {
         "input_ids": np.array([[4299, 23748, 62, 6894, 33529]], dtype=np.int64),
-        "attention_mask": np.array([[1, 1, 1, 1, 1]], dtype=np.int64),
         "past_key_values": np.random.normal(
             size=(n_layer, 2, 1, n_head, 0, embed_size_per_head)
         ).astype(np.float32),

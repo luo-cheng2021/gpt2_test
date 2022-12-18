@@ -19,12 +19,10 @@ class ModelWrapper(torch.nn.Module):
     def forward(
         self,
         input_ids,
-        attention_mask,
         past_key_values,
     ):
         res = self.model(
             input_ids=input_ids,
-            attention_mask=attention_mask,
             past_key_values=past_key_values,
             use_cache=True,
         )
