@@ -30,18 +30,28 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         self.net.reshape({'input_ids': [self.batch, -1], #[2, -1], # [-1, -1],
                           'past_key_values': [12,2,self.batch,12,-1,64] #[12,2,2,12,-1,64] #[12,2,-1,12,-1,64]
                           })
-        config = {'PERFORMANCE_HINT': 'LATENCY',
+        config = {'PERFORMANCE_HINT': '',
             'NUM_STREAMS': '1' if self.batch == 2 else '2',
             'INFERENCE_PRECISION_HINT': 'bf16',
-            'CPU_RUNTIME_CACHE_CAPACITY': '5000000'
-            #'INFERENCE_NUM_THREADS': '64'
+            'CPU_RUNTIME_CACHE_CAPACITY': '5000000',
+            'AFFINITY': 'CORE',
+            #'PERFORMANCE_HINT_NUM_REQUESTS': '2'
+            #'ENFORCE_BF16': 'YES'
+            'INFERENCE_NUM_THREADS': '112' #'64'
             }
 
         self.exec_net1 = self.core.compile_model(self.net, 'CPU', config)
         model = self.exec_net1.get_runtime_model()
         serialize(model, 'exec1.xml', 'exec1.bin')
-        self.nireq = 4
+        self.nireq = 2
         self.req1 = AsyncInferQueue(self.exec_net1, self.nireq) #self.exec_net1.create_infer_request()
+        self.stat = {
+            'init': 0,
+            'infer_1x300': 0,
+            'infer_1x1': 0,
+            'post': 0,
+            'times': 0
+        }
 
         # self.net.reshape({'input_ids': [2, 1], # [-1, -1],
         #                   'past_key_values': [12,2,2,12,-1,64] #[12,2,-1,12,-1,64]
@@ -75,6 +85,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ):
+        beg = time.time()
         if past_key_values is None:
             past_key_values_array = np.zeros(
                 [
@@ -88,7 +99,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             ).astype(np.float32)
         else:
             past_key_values_array = (
-                torch.stack([torch.stack(x) for x in past_key_values]).cpu().numpy()
+               torch.stack([torch.stack(x) for x in past_key_values]).cpu().numpy()
             )
 
         input_ids_np = input_ids.cpu().numpy()
@@ -100,6 +111,9 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             0: Tensor(input_ids_np[self.batch:, :]),
             1: Tensor(past_key_values_array[:, :, self.batch:, :, :, :]),
         }
+        #print(f'cost0 {time.time() - beg} with {inputs1[0].shape}')
+        self.stat['init'] += time.time() - beg
+
         beg = time.time()
         # self.req1.set_tensors(inputs)
         # self.req1.infer()
@@ -111,6 +125,12 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             self.req1[idle_id2].set_input_tensors(inputs2)
             self.req1.start_async()
         self.req1.wait_all()
+        if inputs1[0].shape[1] == 300:
+            self.stat['infer_1x300'] += time.time() - beg
+        else:
+            self.stat['infer_1x1'] += time.time() - beg
+        #print(f'cost1 {time.time() - beg} with {inputs1[0].shape}')
+        beg = time.time()
         if self.batch == 1:
             logits1, past_key_values_array1 = self.req1[idle_id1].outputs
             logits2, past_key_values_array2 = self.req1[idle_id2].outputs
@@ -119,14 +139,17 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         else:
             logits1, past_key_values_array1 = self.req1[idle_id1].outputs
             logits, past_key_values_array = logits1.data, past_key_values_array1.data
-        print(f'cost {time.time() - beg} with {inputs1[0].shape}')
         past_key_values = tuple(
             [tuple([torch.from_numpy(i) for i in x]) for x in past_key_values_array]
         )
+        x = torch.from_numpy(logits) 
+        #print(f'cost2 {time.time() - beg} with {inputs1[0].shape}')
+        self.stat['post'] += time.time() - beg
+        self.stat['times'] += 1
 
         return CausalLMOutputWithCrossAttentions(
             loss=None,
-            logits=torch.from_numpy(logits),
+            logits=x,
             past_key_values=past_key_values,
             hidden_states=None,
             attentions=None,
@@ -158,7 +181,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             if token_type_ids is not None:
                 token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
 
-        attention_mask = kwargs.get("attention_mask", None)
+        attention_mask = None
         position_ids = kwargs.get("position_ids", None)
 
         if attention_mask is not None and position_ids is None:
@@ -207,6 +230,13 @@ for j, i in enumerate(df.prompt.iloc[:5]):
     x = tokenizer.batch_decode(outputs, skip_special_tokens=True)
     f.write('\n'.join(x))
     f.write(f'\n{j} ==============================\n')
-    print(f'{j} cost {end-beg:.2f} sec')
+    print(f'{j} cost {end-beg:.2f} sec, stat {model.stat}')
+    model.stat = {
+        'init': 0,
+        'infer_1x300': 0,
+        'infer_1x1': 0,
+        'post': 0,
+        'times': 0
+    }
 
 f.close()
