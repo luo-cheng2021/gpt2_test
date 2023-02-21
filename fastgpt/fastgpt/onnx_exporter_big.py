@@ -19,9 +19,9 @@ def generate_onnx_representation(model, onnx_name_path=None):
     os.makedirs(os.path.join(model.config._name_or_path, "onnx"), exist_ok=True)
     if onnx_name_path is None:
         onnx_name_path = os.path.join(model.config._name_or_path, "onnx", "model.onnx")
-    n_layer = model.config.n_layer
-    n_head = model.config.n_head
-    embed_size_per_head = int(model.config.n_embd / model.config.n_head)
+    n_layer = model.config.num_hidden_layers
+    n_head = model.config.num_attention_heads
+    embed_size_per_head = int(model.config.hidden_size / n_head)
     model_wrapper = ModelWrapper(model)
     model_wrapper.eval()
     past_key_values = torch.randn([n_layer, 2, 1, n_head, 1, embed_size_per_head])
@@ -79,9 +79,9 @@ def quantize(onnx_name_path):
 
 def test_torch_inference(model):
     print("torch加载测试...")
-    n_layer = model.config.n_layer
-    n_head = model.config.n_head
-    embed_size_per_head = int(model.config.n_embd / model.config.n_head)
+    n_layer = model.config.num_hidden_layers
+    n_head = model.config.num_attention_heads
+    embed_size_per_head = int(model.config.hidden_size / n_head)
     model_wrapper = ModelWrapper(model)
     model_wrapper.eval()
     past_key_values = torch.randn([n_layer, 2, 1, n_head, 0, embed_size_per_head])
@@ -104,9 +104,9 @@ def test_torch_inference(model):
 
 def test_onnx_inference(onnx_name_path, config):
     print("onnx加载测试...")
-    n_layer = config.n_layer
-    n_head = config.n_head
-    embed_size_per_head = int(config.n_embd / config.n_head)
+    n_layer = config.num_hidden_layers
+    n_head = config.num_attention_heads
+    embed_size_per_head = int(config.hidden_size / n_head)
     session = onnxruntime.InferenceSession(onnx_name_path)
     ort_inputs = {
         "input_ids": np.array([[4299, 23748, 62, 6894, 33529]], dtype=np.int64),
