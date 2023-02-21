@@ -33,7 +33,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
                           })
         config = {'PERFORMANCE_HINT': '',
             'NUM_STREAMS': '1',
-            'INFERENCE_PRECISION_HINT': 'bf16',
+            'INFERENCE_PRECISION_HINT': 'f32',
             'CPU_RUNTIME_CACHE_CAPACITY': '5000000',
             'AFFINITY': 'CORE',
             #'PERFORMANCE_HINT_NUM_REQUESTS': '2'
@@ -49,6 +49,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         self.req300 = self.exec_net300.create_infer_request()
         self.req1 = self.exec_net1.create_infer_request()
         self.idx = 0
+        self.idx_test = 0
         self.stat = {
             'init': 0,
             'infer_1x300': 0,
@@ -96,6 +97,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             past_key_num = np.array([300 + self.idx,], dtype=np.int64)
             self.idx += 1
         input_ids_np = input_ids.cpu().numpy()
+        #np.save('input_ids.npy', input_ids_np)
         inputs = {
             0: Tensor(input_ids_np),
             1: Tensor(past_key_num),
@@ -113,12 +115,18 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         else:
             self.req1.set_input_tensors(inputs)
             self.req1.infer()
-            self.stat['infer_1x1'] += time.time() - beg
+            cost = time.time() - beg
+            self.stat['infer_1x1'] += cost
+            #print(f'{self.idx} {cost}')
             logits, = self.req1.outputs
 
         #print(f'cost1 {time.time() - beg} with {inputs1[0].shape}')
         beg = time.time()
         x = torch.from_numpy(logits.data)
+        ref = np.load(f'lm_logits{self.idx_test}.npy', allow_pickle=True)
+        if not np.allclose(x, ref, 0.01, 0.01):
+            print(f'error {self.idx_test}')
+        self.idx_test += 1
         #print(f'cost2 {time.time() - beg} with {inputs1[0].shape}')
         self.stat['post'] += time.time() - beg
         self.stat['times'] += 1
