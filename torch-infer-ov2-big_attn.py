@@ -15,8 +15,12 @@ from fastgpt.fastgpt.onnx_exporter_big import transformers_onnx_pipeline
 from openvino.runtime import Core, Model, Tensor, PartialShape, serialize, AsyncInferQueue
 from openvino.runtime.passes import Manager
 from openvino.runtime.passes import VisualizeTree
+import argparse
 
+OV_MODEL_PATH = '/home/xiping/luocheng/openvino/hacked/gpt_neox.xml'
+PYTORCH_MODEL_PATH = 'model_big'
 class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
+    beam_idx = None
     def __init__(
         self, model_path, config=None, threads: int = 0
     ):
@@ -25,11 +29,11 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         PreTrainedModel.__init__(self, config)
 
         self.core = Core()
-        self.net = self.core.read_model(model='/home/luocheng/openvino/hacked/gpt_neox.xml')
+        self.net = self.core.read_model(model=OV_MODEL_PATH)
         #serialize(self.net, "1.xml", "1.bin")
         self.batch = 2
         self.net.reshape({'input_ids': [self.batch, 300], #[2, -1], # [-1, -1],
-                          #'past_key_values': [32,2,self.batch,32,-1,80] #[12,2,2,12,-1,64] #[12,2,-1,12,-1,64]
+                          'beam_idx': [self.batch]
                           })
         config = {'PERFORMANCE_HINT': '',
             'NUM_STREAMS': '1',
@@ -38,12 +42,12 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             'AFFINITY': 'CORE',
             #'PERFORMANCE_HINT_NUM_REQUESTS': '2'
             #'ENFORCE_BF16': 'YES'
-            'INFERENCE_NUM_THREADS': '56' #'64'
+            #'INFERENCE_NUM_THREADS': '56' #'64'
             }
 
         self.exec_net300 = self.core.compile_model(self.net, 'CPU', config)
-        self.net.reshape({'input_ids': [self.batch, 1], #[2, -1], # [-1, -1],
-                          #'past_key_values': [32,2,self.batch,32,-1,80] #[12,2,2,12,-1,64] #[12,2,-1,12,-1,64]
+        self.net.reshape({'input_ids': [self.batch, 1],
+                          'beam_idx': [self.batch]
                           })
         self.exec_net1 = self.core.compile_model(self.net, 'CPU', config)
         self.req300 = self.exec_net300.create_infer_request()
@@ -57,14 +61,6 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             'post': 0,
             'times': 0
         }
-
-        # self.net.reshape({'input_ids': [2, 1], # [-1, -1],
-        #                   'past_key_values': [12,2,2,12,-1,64] #[12,2,-1,12,-1,64]
-        #                   })
-        # self.exec_net2 = self.core.compile_model(self.net, 'CPU', config)
-        # model = self.exec_net2.get_runtime_model()
-        # serialize(model, 'exec2.xml', 'exec2.bin')
-        # self.req2 = AsyncInferQueue(self.exec_net2, self.nireq) #self.exec_net1.create_infer_request()
 
     @classmethod
     def from_pretrained(cls, model_name_path: str, threads=0):
@@ -97,16 +93,18 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             past_key_num = np.array([300 + self.idx,], dtype=np.int64)
             self.idx += 1
         input_ids_np = input_ids.cpu().numpy()
+        if CausalLMModelForOV.beam_idx is None:
+            beam_idx_np = np.zeros(input_ids.shape[0], dtype=np.int64)
+        else:
+            beam_idx_np = CausalLMModelForOV.beam_idx.cpu().numpy()
         #np.save('input_ids.npy', input_ids_np)
         inputs = {
             0: Tensor(input_ids_np),
             1: Tensor(past_key_num),
+            2: Tensor(beam_idx_np)
         }
-        #print(f'cost0 {time.time() - beg} with {inputs1[0].shape}')
         self.stat['init'] += time.time() - beg
         beg = time.time()
-        # self.req1.set_tensors(inputs)
-        # self.req1.infer()
         if input_ids.shape[1] == 300:
             self.req300.set_input_tensors(inputs)
             self.req300.infer()
@@ -117,24 +115,17 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             self.req1.infer()
             cost = time.time() - beg
             self.stat['infer_1x1'] += cost
-            #print(f'{self.idx} {cost}')
             logits, = self.req1.outputs
 
-        #print(f'cost1 {time.time() - beg} with {inputs1[0].shape}')
         beg = time.time()
         x = torch.from_numpy(logits.data)
-        ref = np.load(f'lm_logits{self.idx_test}.npy', allow_pickle=True)
-        if not np.allclose(x, ref, 0.01, 0.01):
-            print(f'error {self.idx_test}')
-        self.idx_test += 1
-        #print(f'cost2 {time.time() - beg} with {inputs1[0].shape}')
         self.stat['post'] += time.time() - beg
         self.stat['times'] += 1
 
         return CausalLMOutputWithCrossAttentions(
             loss=None,
             logits=x,
-            past_key_values=None,
+            past_key_values='not none',
             hidden_states=None,
             attentions=None,
             cross_attentions=None,
@@ -149,6 +140,8 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         [`~PreTrainedModel.beam_sample`] is called. This is required to match `past_key_values` with the correct
         beam_idx at every generation step.
         """
+        CausalLMModelForOV.beam_idx = beam_idx
+        return 'not none'
         return tuple(
             tuple(
                 past_state.index_select(0, beam_idx.to(past_state.device))
@@ -185,42 +178,51 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             "token_type_ids": token_type_ids,
         }
 
+def main():
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    tokenizer = AutoTokenizer.from_pretrained(PYTORCH_MODEL_PATH)
+    model = CausalLMModelForOV.from_pretrained(PYTORCH_MODEL_PATH)
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-tokenizer = AutoTokenizer.from_pretrained('model_big')
-model = CausalLMModelForOV.from_pretrained('model_big')
+    # workaround model.device check begin
+    old_get_parameter_device = transformers.modeling_utils.get_parameter_device
+    def my_get_parameter_device(parameter):
+        if parameter == model:
+            return torch.device("cpu")
+        else:
+            return old_get_parameter_device(parameter)
+    transformers.modeling_utils.get_parameter_device = my_get_parameter_device
+    # workaround model.device check end
 
-# workaround model.device check begin
-old_get_parameter_device = transformers.modeling_utils.get_parameter_device
-def my_get_parameter_device(parameter):
-    if parameter == model:
-        return torch.device("cpu")
-    else:
-        return old_get_parameter_device(parameter)
-transformers.modeling_utils.get_parameter_device = my_get_parameter_device
-# workaround model.device check end
+    tokenizer.pad_token = tokenizer.eos_token
+    df = pd.read_json('results/a100-asparagus-infers.jsonl', lines=True)
+    f = open('ov-results-attn.txt', 'w')
+    for j, i in enumerate(df.prompt.iloc[:5]):
+        input_ids = tokenizer.encode(i, return_tensors='pt', add_special_tokens=False)
+        if len(input_ids[0]) >= 300:
+            input_ids = input_ids[:, -300:]
+        beg = time.time()
+        outputs = model.generate(input_ids.to(device), pad_token_id=tokenizer.eos_token_id,
+                    num_beams=2, max_new_tokens=100, temperature=1.0)
+        end = time.time()
+        x = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        f.write('\n'.join(x))
+        f.write(f'\n{j} ==============================\n')
+        print(f'{j} cost {end-beg:.2f} sec, stat {model.stat}')
+        model.stat = {
+            'init': 0,
+            'infer_1x300': 0,
+            'infer_1x1': 0,
+            'post': 0,
+            'times': 0
+        }
 
-tokenizer.pad_token = tokenizer.eos_token
-df = pd.read_json('results/a100-asparagus-infers.jsonl', lines=True)
-f = open('ov-results-attn.txt', 'w')
-for j, i in enumerate(df.prompt.iloc[:5]):
-    input_ids = tokenizer.encode(i, return_tensors='pt', add_special_tokens=False)
-    if len(input_ids[0]) >= 300:
-        input_ids = input_ids[:, -300:]
-    beg = time.time()
-    outputs = model.generate(input_ids.to(device), pad_token_id=tokenizer.eos_token_id,
-                   num_beams=2, max_new_tokens=100, temperature=1.0)
-    end = time.time()
-    x = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-    f.write('\n'.join(x))
-    f.write(f'\n{j} ==============================\n')
-    print(f'{j} cost {end-beg:.2f} sec, stat {model.stat}')
-    model.stat = {
-        'init': 0,
-        'infer_1x300': 0,
-        'infer_1x1': 0,
-        'post': 0,
-        'times': 0
-    }
+    f.close()
 
-f.close()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser("")
+    parser.add_argument("org_model_path")
+    parser.add_argument("ov_model_path")
+    args = parser.parse_args()
+    OV_MODEL_PATH = args.ov_model_path
+    PYTORCH_MODEL_PATH = args.org_model_path
+    main()
