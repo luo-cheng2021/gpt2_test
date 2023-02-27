@@ -37,7 +37,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
                           })
         config = {'PERFORMANCE_HINT': '',
             'NUM_STREAMS': '1',
-            'INFERENCE_PRECISION_HINT': 'f32',
+            #'INFERENCE_PRECISION_HINT': 'f32',
             'CPU_RUNTIME_CACHE_CAPACITY': '5000000',
             'AFFINITY': 'CORE',
             #'PERFORMANCE_HINT_NUM_REQUESTS': '2'
@@ -150,7 +150,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             for layer_past in past
         )
 
-    def prepare_inputs_for_generation(self, input_ids, past=None, **kwargs):
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         token_type_ids = kwargs.get("token_type_ids", None)
         # if self.idx // 100 == 0:
         #     # only last token for inputs_ids if past is defined in kwargs
@@ -165,14 +165,14 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             # create position_ids on the fly for batch generation
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
-            if past:
+            if past_key_values:
                 position_ids = position_ids[:, -1].unsqueeze(-1)
         else:
             position_ids = None
 
         return {
             "input_ids": input_ids,
-            "past_key_values": past,
+            "past_key_values": past_key_values,
             "use_cache": kwargs.get("use_cache"),
             "position_ids": position_ids,
             "token_type_ids": token_type_ids,
