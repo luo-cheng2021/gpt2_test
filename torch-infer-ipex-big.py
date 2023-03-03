@@ -7,7 +7,7 @@ from torch.profiler import profile, record_function, ProfilerActivity
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 tokenizer = AutoTokenizer.from_pretrained('model_big')
 model = AutoModelForCausalLM.from_pretrained('model_big').to(device).eval()
-model.config.max_length=301
+model.config.max_length=901
 org_forward = model.base_model.forward
 stat = {
     'init': 0,
@@ -40,16 +40,16 @@ f = open('ipex-results.txt', 'w')
 with torch.cpu.amp.autocast():
     for j, i in enumerate(df.prompt.iloc[:5]):
         input_ids = tokenizer.encode(i, return_tensors='pt')
-        if len(input_ids[0]) >= 300:
-            input_ids = input_ids[:, -300:]
+        if len(input_ids[0]) >= 900:
+            input_ids = input_ids[:, -900:]
         beg = time.time()
         if use_profile:
             with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof, record_function("model_inference"):
                 outputs = model.generate(input_ids.to(device), pad_token_id=tokenizer.eos_token_id,
-                            num_beams=2, max_new_tokens=100, temperature=1.0)
+                            num_beams=2, max_new_tokens=90, temperature=1.0)
         else:
             outputs = model.generate(input_ids.to(device), pad_token_id=tokenizer.eos_token_id,
-                            num_beams=2, max_new_tokens=100, temperature=1.0)
+                            num_beams=2, max_new_tokens=90, temperature=1.0)
         end = time.time()
         x = tokenizer.batch_decode(outputs, skip_special_tokens=True)
         f.write('\n'.join(x))

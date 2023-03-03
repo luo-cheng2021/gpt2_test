@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 from transformers import PreTrainedModel, AutoTokenizer, AutoConfig
+from transformers.tokenization_utils_base import PaddingStrategy
 import torch
 import time
 from fastgpt.fastgpt import CausalLMModelForOnnxGeneration
@@ -19,6 +20,7 @@ import argparse
 
 OV_MODEL_PATH = '/home/xiping/luocheng/openvino/hacked/gpt_neox.xml'
 PYTORCH_MODEL_PATH = 'model_big'
+FIRST_SIZE = 900
 class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
     beam_idx = None
     def __init__(
@@ -32,7 +34,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         self.net = self.core.read_model(model=OV_MODEL_PATH)
         #serialize(self.net, "1.xml", "1.bin")
         self.batch = 2
-        self.net.reshape({'input_ids': [self.batch, 300], #[2, -1], # [-1, -1],
+        self.net.reshape({'input_ids': [self.batch, FIRST_SIZE], #[2, -1], # [-1, -1],
                           'beam_idx': [self.batch]
                           })
         config = {'PERFORMANCE_HINT': '',
@@ -85,12 +87,12 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
     ):
         beg = time.time()
 
-        if input_ids.shape[1] == 300:
+        if input_ids.shape[1] == FIRST_SIZE:
             past_key_num = np.array([0,], dtype=np.int64)
             self.idx = 0
         else:
             input_ids = input_ids[:, -1].unsqueeze(-1)
-            past_key_num = np.array([300 + self.idx,], dtype=np.int64)
+            past_key_num = np.array([FIRST_SIZE + self.idx,], dtype=np.int64)
             self.idx += 1
         input_ids_np = input_ids.cpu().numpy()
         if CausalLMModelForOV.beam_idx is None:
@@ -98,14 +100,19 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         else:
             beam_idx_np = CausalLMModelForOV.beam_idx.cpu().numpy()
         #np.save('input_ids.npy', input_ids_np)
+        attention_mask_np = np.zeros([input_ids_np.shape[0], 1024], dtype=np.int64)
+        attention_mask_org = attention_mask.cpu().numpy()
+        attention_mask_np[:,:attention_mask.shape[1]] = attention_mask_org
+        #np.save('attn.npy', attention_mask_np)
         inputs = {
             0: Tensor(input_ids_np),
             1: Tensor(past_key_num),
-            2: Tensor(beam_idx_np)
+            2: Tensor(beam_idx_np),
+            3: Tensor(attention_mask_np)
         }
         self.stat['init'] += time.time() - beg
         beg = time.time()
-        if input_ids.shape[1] == 300:
+        if input_ids.shape[1] == FIRST_SIZE:
             self.req300.set_input_tensors(inputs)
             self.req300.infer()
             self.stat['infer_1x300'] += time.time() - beg
@@ -158,17 +165,17 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         #     if token_type_ids is not None:
         #         token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
 
-        attention_mask = None
-        position_ids = kwargs.get("position_ids", None)
+        attention_mask = kwargs.get("attention_mask", None)
+        position_ids = None #kwargs.get("position_ids", None)
 
-        if attention_mask is not None and position_ids is None:
-            # create position_ids on the fly for batch generation
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
-            if past_key_values:
-                position_ids = position_ids[:, -1].unsqueeze(-1)
-        else:
-            position_ids = None
+        # if attention_mask is not None and position_ids is None:
+        #     # create position_ids on the fly for batch generation
+        #     position_ids = attention_mask.long().cumsum(-1) - 1
+        #     position_ids.masked_fill_(attention_mask == 0, 1)
+        #     if past_key_values:
+        #         position_ids = position_ids[:, -1].unsqueeze(-1)
+        # else:
+        #     position_ids = None
 
         return {
             "input_ids": input_ids,
@@ -176,6 +183,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             "use_cache": kwargs.get("use_cache"),
             "position_ids": position_ids,
             "token_type_ids": token_type_ids,
+            "attention_mask": attention_mask
         }
 
 def main():
@@ -193,16 +201,16 @@ def main():
     transformers.modeling_utils.get_parameter_device = my_get_parameter_device
     # workaround model.device check end
 
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = 'left'
     df = pd.read_json('results/a100-asparagus-infers.jsonl', lines=True)
     f = open('ov-results-attn.txt', 'w')
     for j, i in enumerate(df.prompt.iloc[:5]):
-        input_ids = tokenizer.encode(i, return_tensors='pt', add_special_tokens=False)
-        if len(input_ids[0]) >= 300:
-            input_ids = input_ids[:, -300:]
+        input_ids = tokenizer.encode(i, padding=PaddingStrategy.MAX_LENGTH, max_length=900, return_tensors='pt', add_special_tokens=False)
+        if len(input_ids[0]) >= 900:
+            input_ids = input_ids[:, -900:]
         beg = time.time()
-        outputs = model.generate(input_ids.to(device), pad_token_id=tokenizer.eos_token_id,
-                    num_beams=2, max_new_tokens=100, temperature=1.0)
+        outputs = model.generate(input_ids.to(device), pad_token_id=tokenizer.pad_token_id,
+                    num_beams=2, max_new_tokens=90, temperature=1.0)
         end = time.time()
         x = tokenizer.batch_decode(outputs, skip_special_tokens=True)
         f.write('\n'.join(x))
