@@ -28,7 +28,7 @@ f = open('ipex-results-big.org.txt', 'w')
 #         f.write('\n'.join(x))
 #         print(f'{j} cost {end-beg} sec')
 #         j += 1
-use_pad = True
+use_pad = False
 for j, i in enumerate(df.prompt.iloc[:5]):
     if use_pad:
         input_ids = tokenizer.encode(i, padding=PaddingStrategy.MAX_LENGTH, max_length=900, return_tensors='pt', add_special_tokens=False)
