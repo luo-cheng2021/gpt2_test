@@ -25,18 +25,20 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         PreTrainedModel.__init__(self, config)
         self.core = Core()
         self.net = self.core.read_model(model=onnx_model_path)
-        serialize(self.net, "origin.xml", "origin.bin")
+        #serialize(self.net, "origin.xml", "origin.bin")
         self.net.reshape({'input_ids': [2, -1], # [-1, -1],
-                          'past_key_values': [12,2,2,12,-1,64] #[12,2,-1,12,-1,64]
+                          'past_key_values': [32,2,2,32,-1,80] #[12,2,-1,12,-1,64]
                           })
-        config = {'PERFORMANCE_HINT': 'LATENCY',
-            #'NUM_STREAMS': '1',
+        config = {'PERFORMANCE_HINT': 'UNDEFINED',
+            'NUM_STREAMS': '1',
             'INFERENCE_PRECISION_HINT': 'bf16',
+            'CPU_RUNTIME_CACHE_CAPACITY': '5000000',
+            'AFFINITY': 'CORE',
             #'INFERENCE_NUM_THREADS': '64'
             }
         self.exec_net = self.core.compile_model(self.net, 'CPU', config)
-        model = self.exec_net.get_runtime_model()
-        serialize(model, 'exec.xml', 'exec.bin')
+        #model = self.exec_net.get_runtime_model()
+        #serialize(model, 'exec.xml', 'exec.bin')
         self.req = self.exec_net.create_infer_request()
 
     @classmethod
@@ -66,12 +68,12 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         if past_key_values is None:
             past_key_values_array = np.zeros(
                 [
-                    self.config.n_layer,
+                    self.config.num_hidden_layers,
                     2,
                     input_ids.shape[0],
-                    self.config.n_head,
+                    self.config.num_attention_heads,
                     0,
-                    int(self.config.n_embd / self.config.n_head),
+                    int(self.config.hidden_size / self.config.num_attention_heads),
                 ]
             ).astype(np.float32)
         else:
@@ -154,8 +156,8 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-tokenizer = AutoTokenizer.from_pretrained('model')
-model = CausalLMModelForOV.from_pretrained('model')
+tokenizer = AutoTokenizer.from_pretrained('model_big')
+model = CausalLMModelForOV.from_pretrained('model_big')
 
 # workaround model.device check begin
 old_get_parameter_device = transformers.modeling_utils.get_parameter_device
@@ -172,11 +174,11 @@ df = pd.read_json('results/a100-asparagus-infers.jsonl', lines=True)
 f = open('ov-results.txt', 'w')
 for j, i in enumerate(df.prompt.iloc[:5]):
     input_ids = tokenizer.encode(i, return_tensors='pt', add_special_tokens=False)
-    if len(input_ids[0]) >= 300:
-        input_ids = input_ids[:, -300:]
+    if len(input_ids[0]) >= 900:
+        input_ids = input_ids[:, -900:]
     beg = time.time()
     outputs = model.generate(input_ids.to(device), pad_token_id=tokenizer.eos_token_id,
-                   num_beams=2, max_new_tokens=100, temperature=1.0)
+                   num_beams=2, max_new_tokens=90, temperature=1.0)
     end = time.time()
     x = tokenizer.batch_decode(outputs, skip_special_tokens=True)
     f.write('\n'.join(x))
