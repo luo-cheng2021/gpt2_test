@@ -40,6 +40,13 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         #model = self.exec_net.get_runtime_model()
         #serialize(model, 'exec.xml', 'exec.bin')
         self.req = self.exec_net.create_infer_request()
+        self.stat = {
+            'init': 0,
+            'infer_1x300': 0,
+            'infer_1x1': 0,
+            'post': 0,
+            'times': 0
+        }
 
     @classmethod
     def from_pretrained(cls, model_name_path: str, threads=0):
@@ -65,6 +72,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ):
+        beg = time.time()
         if past_key_values is None:
             past_key_values_array = np.zeros(
                 [
@@ -92,17 +100,26 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             "past_key_values": Tensor(past_key_values_array),
         }
         #print(input_ids.shape, attention_mask.shape, past_key_values_array.shape)
+        self.stat['init'] += time.time() - beg
+        beg = time.time()
         self.req.set_tensors(inputs)
         self.req.infer()
         logits, past_key_values_array = self.req.outputs
-
+        if input_ids.shape[1] != 1:
+            self.stat['infer_1x300'] += time.time() - beg
+        else:
+            self.stat['infer_1x1'] += time.time() - beg
+        beg = time.time()
         past_key_values = tuple(
             [tuple([torch.from_numpy(i) for i in x]) for x in past_key_values_array.data]
         )
+        x = torch.from_numpy(logits.data)
+        self.stat['post'] += time.time() - beg
+        self.stat['times'] += 1
 
         return CausalLMOutputWithCrossAttentions(
             loss=None,
-            logits=torch.from_numpy(logits.data),
+            logits=x,
             past_key_values=past_key_values,
             hidden_states=None,
             attentions=None,
@@ -126,10 +143,10 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             for layer_past in past
         )
 
-    def prepare_inputs_for_generation(self, input_ids, past=None, **kwargs):
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         token_type_ids = kwargs.get("token_type_ids", None)
         # only last token for inputs_ids if past is defined in kwargs
-        if past:
+        if past_key_values:
             input_ids = input_ids[:, -1].unsqueeze(-1)
             if token_type_ids is not None:
                 token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
@@ -141,14 +158,14 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             # create position_ids on the fly for batch generation
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
-            if past:
+            if past_key_values:
                 position_ids = position_ids[:, -1].unsqueeze(-1)
         else:
             position_ids = None
 
         return {
             "input_ids": input_ids,
-            "past_key_values": past,
+            "past_key_values": past_key_values,
             "use_cache": kwargs.get("use_cache"),
             "position_ids": position_ids,
             "token_type_ids": token_type_ids,
@@ -183,6 +200,13 @@ for j, i in enumerate(df.prompt.iloc[:5]):
     x = tokenizer.batch_decode(outputs, skip_special_tokens=True)
     f.write('\n'.join(x))
     f.write(f'\n{j} ==============================\n')
-    print(f'{j} cost {end-beg:.2f} sec')
+    print(f'{j} cost {end-beg:.2f} sec, stat {model.stat}')
+    model.stat = {
+        'init': 0,
+        'infer_1x300': 0,
+        'infer_1x1': 0,
+        'post': 0,
+        'times': 0
+    }
 
 f.close()
