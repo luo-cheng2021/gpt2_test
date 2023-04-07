@@ -3,4 +3,5 @@ numpy
 onnx
 onnxruntime
 tqdm
-transformers==4.25.1
+transformers==4.27.4
+pandas

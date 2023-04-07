@@ -3,8 +3,18 @@
 Test scripts for gpt2 based models.
 Based on https://github.com/LowinLi/fastgpt.
 
-## prepare ov package
+## [opt] python venv
+```
+python3.8 -m venv .env
+source .env/bin/activate
+```
+
+## prepare specific ov package
+```
+git clone https://github.com/luo-cheng2021/openvino.git -b luocheng/gpt_neox
+cd openvino && git submodule update --init --recursive
 source ~/intel/oneapi/setvars.sh
+mkdir build && cd build
 cmake .. -DCMAKE_C_COMPILER=icc -DCMAKE_CXX_COMPILER=icpc \
     -DENABLE_CPU_DEBUG_CAPS=ON \
     -DENABLE_DEBUG_CAPS=ON  \
@@ -15,7 +25,7 @@ cmake .. -DCMAKE_C_COMPILER=icc -DCMAKE_CXX_COMPILER=icpc \
     -DENABLE_CPPLINT=OFF \
     -DENABLE_CPPLINT_REPORT=OFF \
     -DENABLE_NCC_STYLE=OFF \
-    -DENABLE_TESTS=ON \
+    -DENABLE_TESTS=OFF \
     -DENABLE_OV_CORE_UNIT_TESTS=OFF \
     -DENABLE_INTEL_CPU=ON \
     -DENABLE_INTEL_GPU=OFF \
@@ -37,24 +47,44 @@ cmake .. -DCMAKE_C_COMPILER=icc -DCMAKE_CXX_COMPILER=icpc \
     -DCMAKE_INSTALL_PREFIX=`pwd`/install \
     -DCMAKE_INSTALL_RPATH=`pwd`/install/runtime/3rdparty/tbb/lib:`pwd`/install/runtime/3rdparty/hddl/lib:`pwd`/install/runtime/lib/intel64 \
     -Dgflags_Dir=`pwd`/../thirdparty/gflags/gflags/cmake
+make -j 64 install
+source install/setupvars.sh
+cd ../../
+```
 
 ## prepare python package
-pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cpu
+```
+git clone https://github.com/luo-cheng2021/gpt2_test.git
+cd gpt2_test
+pip3 install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cpu
+pip3 install -r requirements.txt
+```
 
-pip install -r requirements.txt
+## prepare model
+```
+# make link to model_big or just copy them
+# ln -s ~/luocheng/gpt2_test/model_big ./model_big
+# ln -s ~/luocheng/gpt2_test/results ./results
+cp /path/model+results ./model_big
+python ../openvino/tools/gpt/gpt_neox_ov.py ./model_big /path/to/ov/IR
+```
 
-## parepare model
-copy model+results to current directory
-python /path/to/ov_src/tools/gpt/gpt_neox_ov.py gpt_neox_ov.py /path/to/pytorch/model /path/to/ov/IR
+## run torch with bf16
+```
+numactl -m0-3 -C0-55 python torch-infer-ipex-big.py
+```
 
-## run ipex
-python torch-infer-ipex.py
+## run just compiled ov
+```
+# if skip prepare stage may need to exec the following 2 lines
+# source ~/intel/oneapi/setvars.sh
+# source path/to/ov/install/setupvars.sh
 
-## run ov
-source ~/intel/oneapi/setvars.sh
-source path/to/ov/setupvars.sh
+numactl -m0-3 -C0-55 python torch-infer-ov2-big_attn_dyn.py model_big /path/to/ov/IR
+```
 
-python torch-infer-ov2-big_attn_dyn.py model_big /path/to/ov/IR
-
-## compare accuracy
-cmp ipex-results.txt ov-results.txt # should show nothing
+## run master ov
+```
+# source path/to/ov/install/setupvars.sh
+numactl -m0-3 -C0-55 python torch-infer-ov.py
+```

@@ -100,16 +100,16 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             "past_key_values": Tensor(past_key_values_array),
         }
         #print(input_ids.shape, attention_mask.shape, past_key_values_array.shape)
+        self.req.set_tensors(inputs)
         self.stat['init'] += time.time() - beg
         beg = time.time()
-        self.req.set_tensors(inputs)
         self.req.infer()
-        logits, past_key_values_array = self.req.outputs
         if input_ids.shape[1] != 1:
             self.stat['infer_1x300'] += time.time() - beg
         else:
             self.stat['infer_1x1'] += time.time() - beg
         beg = time.time()
+        logits, past_key_values_array = self.req.outputs
         past_key_values = tuple(
             [tuple([torch.from_numpy(i) for i in x]) for x in past_key_values_array.data]
         )
@@ -208,5 +208,9 @@ for j, i in enumerate(df.prompt.iloc[:5]):
         'post': 0,
         'times': 0
     }
+    #print(model.req.convert())
 
+#m = model.exec_net.get_runtime_model()
+#m = model.net
+#serialize(m, 'ov-normal.xml', 'ov-normal.bin')
 f.close()

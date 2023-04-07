@@ -224,6 +224,8 @@ def main():
         }
 
     f.close()
+    #m = model.exec_net300.get_runtime_model()
+    #serialize(m, 'ov-special.xml', 'ov-special.bin')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("")
