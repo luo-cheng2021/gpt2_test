@@ -265,7 +265,7 @@ def gen_ref_gpt(qkvs, beam_idxs, attn_masks):
             results.append(attn_output.clone().to(dtype=torch.float32).detach().numpy())
     return results
 
-def gen_ov_gpt(qkvs, beam_idxs, attn_masks):
+def gen_ov_gpt_bf16(qkvs, beam_idxs, attn_masks):
     def make_model():
         # [batch, tokens, 32*80*3]
         qkv = opset.parameter([-1, -1, HEAD_NUM * SIZE_PER_HEAD * 3], Type.f32, name='qkv')
@@ -305,7 +305,59 @@ def gen_ov_gpt(qkvs, beam_idxs, attn_masks):
         results.append(np.array(r.data))
     return results
 
-def test_gpt():
+def gen_ov_gpt_i8(qkvs, beam_idxs, attn_masks):
+    def make_model():
+        # [batch, tokens, 32*80*3]
+        qkv = opset.parameter([-1, -1, HEAD_NUM * SIZE_PER_HEAD * 3], Type.f32, name='qkv')
+        past_keys_num = opset.parameter([1,], Type.i64, name='past_keys_num')
+        beam_idx = opset.parameter([-1,], Type.i64, name='beam_idx')
+        attn_mask = opset.parameter([-1, MAX_SEQ_LEN], Type.i64, name='attn_mask')
+
+        # custom op
+        q_quant, k_quant, qk_quant, v_quant = 1.0, 1.0, 255.0, 1.0
+        attn_output = opset.gpt_neox_attn(qkv, past_keys_num, beam_idx, attn_mask,
+                layer_num=0, head_num=HEAD_NUM, size_per_head=SIZE_PER_HEAD, hidden_size=HIDDEN_SIZE, max_position_embeddings=MAX_POSITION_EMBEDDINGS,
+                rotary_emb_base=ROTARY_EMB_BASE, rotary_pct=ROTARY_PCT, max_seq_len=MAX_SEQ_LEN,
+                q_quant=q_quant, k_quant=k_quant, qk_quant=qk_quant, v_quant=v_quant,
+                name=f'/model/gpt_neox/layers.0/attention/attn')
+        attn_output_ = opset.unsqueeze(attn_output, axes=1)
+        fq = opset.fake_quantize(attn_output_, -127, 127, -127, 127, 255, "NUMPY", name=f'fq_input_0')
+        strides = [1, 1]
+        pads_begin = [0, 0]
+        pads_end = [0, 0]
+        dilations = [1, 1]
+        filters = np.ones(1, dtype=np.float32).reshape([1, 1, 1, 1])
+        conv = opset.convolution(fq, filters, strides, pads_begin, pads_end, dilations)
+        out = opset.squeeze(conv, [1])
+        return Model([out], [qkv, past_keys_num, beam_idx, attn_mask])
+    net = make_model()
+    core = Core()
+    config = {'PERFORMANCE_HINT': '',
+            'NUM_STREAMS': '1',
+            'ENFORCE_BF16': 'YES'
+            }
+    model = core.compile_model(net, 'CPU', config)
+    req = model.create_infer_request()
+    results = []
+    seq_offset = 0
+    for (i, qkv) in enumerate(qkvs):
+        attention_mask_np = attn_masks[i]
+        past_key_num = np.array([seq_offset], dtype=np.int64)
+        seq_offset += qkv.shape[1]
+        beam_idx_np = np.array(beam_idxs[i], dtype=np.int64)
+        inputs = {
+            0: Tensor(qkv),
+            1: Tensor(past_key_num),
+            2: Tensor(beam_idx_np),
+            3: Tensor(attention_mask_np)
+        }
+        req.set_input_tensors(inputs)
+        req.infer()
+        r, = req.outputs
+        results.append(np.array(r.data))
+    return results
+
+def test_gpt_bf16():
     qkvs = [
             np.random.random(size=[2, 900, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
             np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
@@ -322,11 +374,36 @@ def test_gpt():
     attn_masks = [np.ones([2, 1024], dtype=np.int64),
                   ] * len(beam_idxs)
     ref_results = gen_ref_gpt(qkvs, beam_idxs, attn_masks)
-    ov_results = gen_ov_gpt(qkvs, beam_idxs, attn_masks)
+    ov_results = gen_ov_gpt_bf16(qkvs, beam_idxs, attn_masks)
     for (i, ref) in enumerate(ref_results):
         if not np.allclose(ref, ov_results[i], rtol=0.001, atol=0.01):
             print(f'error: idx {i} not close')
     else:
         print('done')
 
-test_gpt()
+def test_gpt_i8():
+    qkvs = [
+            np.random.random(size=[2, 900, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
+            np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
+            np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
+            np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
+            ]
+    # qkvs[0][:,:,0::3] = -1
+    # qkvs[0][:,:,1::3] = +1
+    # qkvs[0][:,:,2::3] = 0
+    beam_idxs = [[-1, -1],
+                 [1, 0],
+                 [1, 1],
+                 [0, 0]]
+    attn_masks = [np.ones([2, 1024], dtype=np.int64),
+                  ] * len(beam_idxs)
+    ref_results = gen_ref_gpt(qkvs, beam_idxs, attn_masks)
+    ov_results = gen_ov_gpt_i8(qkvs, beam_idxs, attn_masks)
+    for (i, ref) in enumerate(ref_results):
+        if not np.allclose(ref, ov_results[i], rtol=0.001, atol=0.01):
+            print(f'error: idx {i} not close')
+    else:
+        print('done')
+
+test_gpt_bf16()
+test_gpt_i8()

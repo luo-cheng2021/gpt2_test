@@ -30,6 +30,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
                           'past_key_values': [32,2,2,32,-1,80] #[12,2,-1,12,-1,64]
                           })
         config = {'PERFORMANCE_HINT': 'UNDEFINED',
+            'PERF_COUNT': 'YES',
             'NUM_STREAMS': '1',
             'INFERENCE_PRECISION_HINT': 'bf16',
             'CPU_RUNTIME_CACHE_CAPACITY': '5000000',
@@ -210,7 +211,7 @@ for j, i in enumerate(df.prompt.iloc[:5]):
     }
     #print(model.req.convert())
 
-#m = model.exec_net.get_runtime_model()
+m = model.exec_net.get_runtime_model()
 #m = model.net
-#serialize(m, 'ov-normal.xml', 'ov-normal.bin')
+serialize(m, 'ov-normal.xml', 'ov-normal.bin')
 f.close()

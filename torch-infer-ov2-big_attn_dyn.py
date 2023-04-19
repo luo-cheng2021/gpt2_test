@@ -39,6 +39,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
                           'attn_mask': [self.batch, 1024]
                           })
         config = {'PERFORMANCE_HINT': '',
+            'PERF_COUNT': 'YES',
             'NUM_STREAMS': '1',
             #'INFERENCE_PRECISION_HINT': 'f32',
             'CPU_RUNTIME_CACHE_CAPACITY': '5000000',
@@ -224,8 +225,8 @@ def main():
         }
 
     f.close()
-    #m = model.exec_net300.get_runtime_model()
-    #serialize(m, 'ov-special.xml', 'ov-special.bin')
+    m = model.exec_net300.get_runtime_model()
+    serialize(m, 'ov-special.xml', 'ov-special.bin')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("")
