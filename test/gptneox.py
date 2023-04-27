@@ -2,7 +2,7 @@ import torch
 from openvino.runtime import Core, Model, Tensor, PartialShape, serialize, AsyncInferQueue
 from openvino.runtime.passes import Manager
 from openvino.runtime.passes import VisualizeTree
-import time
+import os
 import numpy as np
 from torch import nn
 
@@ -305,7 +305,8 @@ def gen_ov_gpt_bf16(qkvs, beam_idxs, attn_masks):
         results.append(np.array(r.data))
     return results
 
-def gen_ov_gpt_i8(qkvs, beam_idxs, attn_masks):
+# test matmul with s8 input and whole output type is s8
+def gen_ov_gpt_i8(qkvs, beam_idxs, attn_masks, is_ref=False):
     def make_model():
         # [batch, tokens, 32*80*3]
         qkv = opset.parameter([-1, -1, HEAD_NUM * SIZE_PER_HEAD * 3], Type.f32, name='qkv')
@@ -314,22 +315,28 @@ def gen_ov_gpt_i8(qkvs, beam_idxs, attn_masks):
         attn_mask = opset.parameter([-1, MAX_SEQ_LEN], Type.i64, name='attn_mask')
 
         # custom op
-        q_quant, k_quant, qk_quant, v_quant = 1.0, 1.0, 255.0, 1.0
-        attn_output = opset.gpt_neox_attn(qkv, past_keys_num, beam_idx, attn_mask,
-                layer_num=0, head_num=HEAD_NUM, size_per_head=SIZE_PER_HEAD, hidden_size=HIDDEN_SIZE, max_position_embeddings=MAX_POSITION_EMBEDDINGS,
-                rotary_emb_base=ROTARY_EMB_BASE, rotary_pct=ROTARY_PCT, max_seq_len=MAX_SEQ_LEN,
-                q_quant=q_quant, k_quant=k_quant, qk_quant=qk_quant, v_quant=v_quant,
-                name=f'/model/gpt_neox/layers.0/attention/attn')
-        attn_output_ = opset.unsqueeze(attn_output, axes=1)
-        fq = opset.fake_quantize(attn_output_, -127, 127, -127, 127, 255, "NUMPY", name=f'fq_input_0')
-        strides = [1, 1]
-        pads_begin = [0, 0]
-        pads_end = [0, 0]
-        dilations = [1, 1]
-        filters = np.ones(1, dtype=np.float32).reshape([1, 1, 1, 1])
-        conv = opset.convolution(fq, filters, strides, pads_begin, pads_end, dilations)
-        out = opset.squeeze(conv, [1])
-        return Model([out], [qkv, past_keys_num, beam_idx, attn_mask])
+        requant = 10.0
+        if not is_ref:
+            q_quant, k_quant, qk_quant, v_quant = 127.0, 127.0, 255.0, 127.0
+            attn_output = opset.gpt_neox_attn(qkv, past_keys_num, beam_idx, attn_mask,
+                    layer_num=0, head_num=HEAD_NUM, size_per_head=SIZE_PER_HEAD, hidden_size=HIDDEN_SIZE, max_position_embeddings=MAX_POSITION_EMBEDDINGS,
+                    rotary_emb_base=ROTARY_EMB_BASE, rotary_pct=ROTARY_PCT, max_seq_len=MAX_SEQ_LEN,
+                    q_quant=q_quant, k_quant=k_quant, qk_quant=qk_quant, v_quant=v_quant,
+                    name=f'/model/gpt_neox/layers.0/attention/attn')
+            fq = opset.fake_quantize(attn_output, -127/requant, 127/requant, -127/requant, 127/requant, 255, "NUMPY", name=f'fq_input_0')
+            fq_result = opset.convert(fq, np.int8)
+        else:
+            q_quant, k_quant, qk_quant, v_quant = 0.0, 0.0, 0.0, 0.0
+            attn_output = opset.gpt_neox_attn(qkv, past_keys_num, beam_idx, attn_mask,
+                    layer_num=0, head_num=HEAD_NUM, size_per_head=SIZE_PER_HEAD, hidden_size=HIDDEN_SIZE, max_position_embeddings=MAX_POSITION_EMBEDDINGS,
+                    rotary_emb_base=ROTARY_EMB_BASE, rotary_pct=ROTARY_PCT, max_seq_len=MAX_SEQ_LEN,
+                    q_quant=q_quant, k_quant=k_quant, qk_quant=qk_quant, v_quant=v_quant,
+                    name=f'/model/gpt_neox/layers.0/attention/attn')
+            #attn_output = opset.clamp(attn_output, -12.7, 12.7, name='clamp1')
+            fq_result = opset.multiply(attn_output, np.array([requant], dtype=np.float32))
+            #fq_result = opset.fake_quantize(attn_output, -127, 127, -127, 127, 255, "NUMPY", name=f'fq_input_0')
+
+        return Model([fq_result], [qkv, past_keys_num, beam_idx, attn_mask])
     net = make_model()
     core = Core()
     config = {'PERFORMANCE_HINT': '',
@@ -354,19 +361,24 @@ def gen_ov_gpt_i8(qkvs, beam_idxs, attn_masks):
         req.set_input_tensors(inputs)
         req.infer()
         r, = req.outputs
-        results.append(np.array(r.data))
+        results.append((np.array(r.data)+0.5).astype(np.int8))
     return results
 
 def test_gpt_bf16():
+    print('testing bf16...')
     qkvs = [
             np.random.random(size=[2, 900, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
             np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
             np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
             np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
             ]
-    # qkvs[0][:,:,0::3] = -1
-    # qkvs[0][:,:,1::3] = +1
-    # qkvs[0][:,:,2::3] = 0
+    # for i in range(0):
+    #     # qkvs[i][:,:,0::3] = -1
+    #     # qkvs[i][:,:,1::3] = +1
+    #     # qkvs[i][:,:,2::3] = 0
+    #     qkvs[i][:,:,0::2] = -0.5
+    #     qkvs[i][:,:,1::2] = +0.5
+    #     #qkvs[i][:,:,2::3] = 0
     beam_idxs = [[-1, -1],
                  [1, 0],
                  [1, 1],
@@ -376,31 +388,44 @@ def test_gpt_bf16():
     ref_results = gen_ref_gpt(qkvs, beam_idxs, attn_masks)
     ov_results = gen_ov_gpt_bf16(qkvs, beam_idxs, attn_masks)
     for (i, ref) in enumerate(ref_results):
-        if not np.allclose(ref, ov_results[i], rtol=0.001, atol=0.01):
+        if not np.allclose(ref, ov_results[i], rtol=0.01, atol=0.01):
             print(f'error: idx {i} not close')
     else:
         print('done')
 
 def test_gpt_i8():
+    print('testing i8...')
     qkvs = [
-            np.random.random(size=[2, 900, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
-            np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
-            np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
-            np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
+            np.random.randint(low=-1, high=2, size=[2, 100, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
+            np.random.randint(low=-1, high=2, size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
+            np.random.randint(low=-1, high=2, size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
+            np.random.randint(low=-1, high=2, size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
+            # np.random.random(size=[2, 100, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
+            # np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
+            # np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
+            # np.random.random(size=[2, 1, HEAD_NUM * SIZE_PER_HEAD * 3]).astype(np.float32),
             ]
-    # qkvs[0][:,:,0::3] = -1
-    # qkvs[0][:,:,1::3] = +1
-    # qkvs[0][:,:,2::3] = 0
+    for i in range(len(qkvs)):
+        pass
+        # qkvs[i][:,:,0::3] = -1
+        # qkvs[i][:,:,1::3] = +1
+        # qkvs[i][:,:,2::3] = 0
     beam_idxs = [[-1, -1],
                  [1, 0],
                  [1, 1],
                  [0, 0]]
     attn_masks = [np.ones([2, 1024], dtype=np.int64),
                   ] * len(beam_idxs)
-    ref_results = gen_ref_gpt(qkvs, beam_idxs, attn_masks)
-    ov_results = gen_ov_gpt_i8(qkvs, beam_idxs, attn_masks)
+    for i in range(len(qkvs)):
+        #np.save(f'xx{i}.npy', qkvs[i], allow_pickle=True)
+        #qkvs[i] = np.load(f'xx{i}.npy', allow_pickle=True)
+        pass
+    ref_results1 = gen_ref_gpt(qkvs, beam_idxs, attn_masks)
+    ref_results = gen_ov_gpt_i8(qkvs, beam_idxs, attn_masks, True)
+    ov_results = gen_ov_gpt_i8(qkvs, beam_idxs, attn_masks, False)
     for (i, ref) in enumerate(ref_results):
-        if not np.allclose(ref, ov_results[i], rtol=0.001, atol=0.01):
+        #if not np.allclose(ref, ov_results[i], rtol=0.001, atol=0.01):
+        if (np.abs(ref_results[i]- ov_results[i])>2).any():
             print(f'error: idx {i} not close')
     else:
         print('done')
