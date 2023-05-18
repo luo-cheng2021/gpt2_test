@@ -60,7 +60,7 @@ pip3 install torch torchvision torchaudio --extra-index-url https://download.pyt
 pip3 install -r requirements.txt
 ```
 
-## prepare model
+## prepare bf16 model
 ```
 # make link to model_big or just copy them
 # ln -s ~/luocheng/gpt2_test/model_big ./model_big
@@ -69,22 +69,40 @@ cp /path/model+results ./model_big
 python ../openvino/tools/gpt/gpt_neox_ov.py ./model_big /path/to/ov/IR
 ```
 
-## run torch with bf16
+## [opt]prepare int8 model
 ```
-numactl -m0-3 -C0-55 python torch-infer-ipex-big.py
+# make link to model_big or just copy them
+# ln -s ~/luocheng/gpt2_test/model_big ./model_big
+# ln -s ~/luocheng/gpt2_test/results ./results
+cp /path/model+results ./model_big
+python ../openvino/tools/gpt/gpt_neox_ov.py ./model_big /path/to/ov/INT8-IR /path/to/ov/quantized-INT8-IR
 ```
 
-## run just compiled ov
+## run torch with bf16
+```
+numactl --localalloc -C0-55 python torch-infer-ipex-big.py
+```
+
+## run just compiled ov with bf16
 ```
 # if skip prepare stage may need to exec the following 2 lines
 # source ~/intel/oneapi/setvars.sh
 # source path/to/ov/install/setupvars.sh
 
-numactl -m0-3 -C0-55 python torch-infer-ov2-big_attn_dyn.py model_big /path/to/ov/IR
+OMP_NUM_THREADS=1 numactl --localalloc -C0-55 python torch-infer-ov2-big_attn_dyn.py model_big /path/to/ov/IR
+```
+
+## [opt]run just compiled ov with int8
+```
+# if skip prepare stage may need to exec the following 2 lines
+# source ~/intel/oneapi/setvars.sh
+# source path/to/ov/install/setupvars.sh
+
+OMP_NUM_THREADS=1 numactl --localalloc -C0-55 python torch-infer-ov2-big_attn_dyn.py model_big /path/to/ov/INT8-IR
 ```
 
 ## run master ov
 ```
 # source path/to/ov/install/setupvars.sh
-numactl -m0-3 -C0-55 python torch-infer-ov.py
+OMP_NUM_THREADS=1 numactl --localalloc -C0-55 python torch-infer-ov.py
 ```
