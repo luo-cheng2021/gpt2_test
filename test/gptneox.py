@@ -275,7 +275,7 @@ def gen_ov_gpt_bf16(qkvs, beam_idxs, attn_masks):
 
         # custom op
         attn_output = opset.gpt_neox_attn(qkv, past_keys_num, beam_idx, attn_mask,
-                layer_num=0, head_num=HEAD_NUM, size_per_head=SIZE_PER_HEAD, hidden_size=HIDDEN_SIZE, max_position_embeddings=MAX_POSITION_EMBEDDINGS,
+                layer_num=1, head_num=HEAD_NUM, size_per_head=SIZE_PER_HEAD, hidden_size=HIDDEN_SIZE, max_position_embeddings=MAX_POSITION_EMBEDDINGS,
                 rotary_emb_base=ROTARY_EMB_BASE, rotary_pct=ROTARY_PCT, max_seq_len=MAX_SEQ_LEN, name=f'/model/gpt_neox/layers.0/attention/attn')
         return Model([attn_output], [qkv, past_keys_num, beam_idx, attn_mask])
     net = make_model()
@@ -515,7 +515,7 @@ def gen_ov_gpt_i8(qkvs, beam_idxs, attn_masks, q_quant=0.0, k_quant=0.0, qk_quan
 
         # custom op
         attn_output = opset.gpt_neox_attn(qkv, past_keys_num, beam_idx, attn_mask,
-                layer_num=0, head_num=HEAD_NUM, size_per_head=SIZE_PER_HEAD, hidden_size=HIDDEN_SIZE, max_position_embeddings=MAX_POSITION_EMBEDDINGS,
+                layer_num=1, head_num=HEAD_NUM, size_per_head=SIZE_PER_HEAD, hidden_size=HIDDEN_SIZE, max_position_embeddings=MAX_POSITION_EMBEDDINGS,
                 rotary_emb_base=ROTARY_EMB_BASE, rotary_pct=ROTARY_PCT, max_seq_len=MAX_SEQ_LEN,
                 q_quant=q_quant, k_quant=k_quant, qk_quant=qk_quant, v_quant=v_quant,
                 name=f'/model/gpt_neox/layers.0/attention/attn')
