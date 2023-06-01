@@ -18,38 +18,6 @@ from openvino.runtime import Core, Model, Tensor, PartialShape, Type, Shape, ser
 from openvino.runtime import opset10 as opset
 from openvino.preprocess import PrePostProcessor
 
-class converter_f32_bf16:
-    def __init__(self, shape):
-        input = opset.parameter(shape, Type.f32)
-        out = opset.convert(input, 'bf16')
-
-        net = Model([out], [input])
-        core = Core()
-        model = core.compile_model(net, 'CPU')
-        self.req = model.create_infer_request()
-    # return a tensor which type is bfloat16
-    def convert(self, input_np):
-        self.req.set_input_tensors({0: Tensor(input_np)})
-        self.req.infer()
-        r, = self.req.output_tensors
-        return r
-
-class converter_bf16_f32:
-    def __init__(self, shape):
-        input = opset.parameter(shape, Type.bf16)
-        out = opset.convert(input, 'f32')
-
-        net = Model([out], [input])
-        core = Core()
-        model = core.compile_model(net, 'CPU')
-        self.req = model.create_infer_request()
-    # input tensor type is bfloat16, return type is numpy float32
-    def convert(self, input_bf16):
-        self.req.set_input_tensors({0: input_bf16})
-        self.req.infer()
-        r, = self.req.output_tensors
-        return r.data
-
 class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
     def __init__(
         self, onnx_model_path: str, model_path="", config=None, threads: int = 0
@@ -86,8 +54,6 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             'post': 0,
             'times': 0
         }
-        self.f32_bf16 = converter_f32_bf16([32,2,2,32,-1,80])
-        self.bf16_f32 = converter_bf16_f32([32,2,2,32,-1,80])
 
     @classmethod
     def from_pretrained(cls, model_name_path: str, threads=0):
@@ -124,7 +90,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
                     0,
                     int(self.config.hidden_size / self.config.num_attention_heads),
                 ]
-            ).astype(np.float32)
+            ).astype(np.float16)
         else:
             past_key_values_array = (
                 torch.stack([torch.stack(x) for x in past_key_values]).cpu().numpy()
@@ -138,7 +104,7 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             attention_mask = attention_mask.cpu().numpy()
         inputs = {
             "input_ids": Tensor(input_ids.cpu().numpy()),
-            "past_key_values": self.f32_bf16.convert(past_key_values_array),
+            "past_key_values": Tensor(past_key_values_array, past_key_values_array.shape, Type.bf16),
         }
         #print(input_ids.shape, attention_mask.shape, past_key_values_array.shape)
         self.req.set_tensors(inputs)
@@ -151,9 +117,8 @@ class CausalLMModelForOV(CausalLMModelForOnnxGeneration):
             self.stat['infer_1x1'] += time.time() - beg
         beg = time.time()
         logits, past_key_values_array = self.req.outputs
-        past_key_values_array = self.bf16_f32.convert(past_key_values_array)
         past_key_values = tuple(
-            [tuple([torch.from_numpy(i) for i in x]) for x in past_key_values_array]
+            [tuple([torch.from_numpy(i) for i in x]) for x in past_key_values_array.data]
         )
         x = torch.from_numpy(logits.data)
         self.stat['post'] += time.time() - beg
